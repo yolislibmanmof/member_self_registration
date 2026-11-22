@@ -1,26 +1,140 @@
 <?php
+use SLiMS\DB;
 use SLiMS\Url;
+use SLiMS\Table\Schema;
 use SLiMS\Captcha\Factory as Captcha;
 use SLiMS\Filesystems\Storage;
 
-if (!function_exists('getActiveSchemaData'))
-{
-    function getActiveSchemaData()
-    {
-        $state = \SLiMS\DB::getInstance()->query('select * from self_registration_schemas where status = 1');
+/* ================= Utilitas v3 ================= */
 
-        return $state->rowCount() ? $state->fetchObject() : null;
+if (!function_exists('msr_e')) {
+    function msr_e($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+}
+
+if (!function_exists('msr_schema_table')) {
+    function msr_schema_table(string $name): string {
+        return 'self_registration_' . trim(strtolower(str_replace(' ', '_', $name)));
     }
 }
 
-if (!function_exists('action')) {
-    function action(string $actionName, array $attribute = [])
-    {
+if (!function_exists('msr_active_schema')) {
+    function msr_active_schema(bool $fresh = false): ?stdClass {
+        static $cache = null;
+        if ($fresh) $cache = null;
+        if ($cache !== null) return $cache;
+        if (!Schema::hasTable('self_registration_schemas')) return null;
+        $q = DB::getInstance()->query('select * from self_registration_schemas where status = 1');
+        return $cache = ($q->rowCount() ? $q->fetchObject() : null);
+    }
+}
+
+if (!function_exists('msr_option')) {
+    function msr_option($schema): stdClass {
+        return json_decode($schema->option ?? '') ?: new stdClass;
+    }
+}
+
+if (!function_exists('msr_client_ip')) {
+    function msr_client_ip(): string { return (string)($_SERVER['REMOTE_ADDR'] ?? ''); }
+}
+
+if (!function_exists('msr_log')) {
+    function msr_log(string $event, ?string $memberId = null, string $detail = ''): void {
+        try {
+            if (!Schema::hasTable('self_registration_logs')) return;
+            DB::getInstance()->prepare('insert into self_registration_logs (member_id, event, ip_address, detail, created_at) values (?,?,?,?,now())')
+                ->execute([$memberId, $event, msr_client_ip(), $detail]);
+        } catch (Throwable $e) { /* log tidak boleh menggagalkan alur */ }
+    }
+}
+
+if (!function_exists('msr_rate_limit')) {
+    function msr_rate_limit(string $event = 'submit', int $max = 5, int $window = 600): bool {
+        if (!Schema::hasTable('self_registration_logs')) return true;
+        $q = DB::getInstance()->prepare('select count(*) from self_registration_logs where ip_address = ? and event = ? and created_at >= ?');
+        $q->execute([msr_client_ip(), $event, date('Y-m-d H:i:s', time() - $window)]);
+        return (int)$q->fetchColumn() < $max;
+    }
+}
+
+if (!function_exists('msr_csrf_token')) {
+    function msr_csrf_token(): string {
+        return $_SESSION['msr_csrf_token'] ??= bin2hex(random_bytes(24));
+    }
+}
+
+if (!function_exists('msr_csrf_field')) {
+    function msr_csrf_field(): string {
+        return '<input type="hidden" name="msr_csrf" value="' . msr_e(msr_csrf_token()) . '"/>';
+    }
+}
+
+if (!function_exists('msr_csrf_verify')) {
+    function msr_csrf_verify(): bool {
+        return hash_equals($_SESSION['msr_csrf_token'] ?? '', (string)($_POST['msr_csrf'] ?? ''));
+    }
+}
+
+if (!function_exists('msr_password_error')) {
+    function msr_password_error(string $p): ?string {
         global $sysconf;
+        $min = (int)($sysconf['password_policy_min_length'] ?? 8);
+        if (!empty($sysconf['password_policy_strong'])) {
+            if (!class_exists('simbio_security')) {
+                $f = SIMBIO . 'simbio_UTILS/simbio_security.inc.php';
+                if (file_exists($f)) require_once $f;
+            }
+            if (class_exists('simbio_security') && method_exists('simbio_security', 'validatePassword')) {
+                return simbio_security::validatePassword($p, $min) ? null
+                    : 'Kata sandi minimal ' . $min . ' karakter, mengandung huruf besar, angka, dan karakter khusus.';
+            }
+        }
+        return strlen($p) >= $min ? null : 'Kata sandi minimal ' . $min . ' karakter.';
+    }
+}
+
+if (!function_exists('msr_mail')) {
+    function msr_mail(string $to, string $toName, string $subject, string $html): bool {
+        try {
+            if (!class_exists(\SLiMS\Mail::class) || !filter_var($to, FILTER_VALIDATE_EMAIL)) return false;
+            $mail = \SLiMS\Mail::to($to, $toName ?: 'Member')->subject($subject);
+            $mail->isHTML(true);
+            $mail->msgHTML($html);
+            $mail->AltBody = strip_tags($html);
+            $sent = $mail->send();
+            $mail->clearAllRecipients();
+            return (bool)$sent;
+        } catch (Throwable $e) {
+            msr_log('mail_error', null, $e->getMessage());
+            return false;
+        }
+    }
+}
+
+if (!function_exists('msr_type_map')) {
+    // Peta resmi SLiMS\Table\Grammar\Mysql v9.8 — pengganti refleksi properti privat
+    function msr_type_map(): array {
+        return [
+            'string' => 'varchar', 'fixstring' => 'char', 'text' => 'text',
+            'json' => 'json', 'longtext' => 'longtext', 'number' => 'int',
+            'smallnumber' => 'smallint', 'tinynumber' => 'tinyint', 'bignumber' => 'bigint',
+            'decimal' => 'decimal', 'float' => 'float', 'double' => 'double',
+            'date' => 'date', 'datetime' => 'datetime',
+        ];
+    }
+}
+
+/* ================= Fungsi lama (BC) ================= */
+
+if (!function_exists('getActiveSchemaData')) {
+    function getActiveSchemaData() { return msr_active_schema(true); }
+}
+
+if (!function_exists('action')) {
+    function action(string $actionName, array $attribute = []) {
         extract($attribute);
         $trace = debug_backtrace(limit: 1);
         $info = pathinfo(array_pop($trace)['file']);
-        
         if (file_exists($path = $info['dirname'] . DS . 'action' . DS . basename($actionName) . '.php')) {
             include $path;
         } else {
@@ -29,376 +143,287 @@ if (!function_exists('action')) {
     }
 }
 
-
-if (!function_exists('pluginUrl'))
-{
-    /**
-     * Generate URL with plugin_container.php?id=<id>&mod=<mod> + custom query
-     *
-     * @param array $data
-     * @param boolean $reset
-     * @return string
-     */
-    function pluginUrl(array $data = [], bool $reset = false): string
-    {
-        // back to base uri
+if (!function_exists('pluginUrl')) {
+    function pluginUrl(array $data = [], bool $reset = false): string {
         if ($reset) return Url::getSelf(fn($self) => $self . '?mod=' . $_GET['mod'] . '&id=' . $_GET['id']);
-        
-        return Url::getSelf(function($self) use($data) {
-            return $self . '?' . http_build_query(array_merge($_GET,$data));
-        });
+        return Url::getSelf(fn($self) => $self . '?' . http_build_query(array_merge($_GET, $data)));
     }
 }
 
 if (!function_exists('textColor')) {
-    // source : https://www.bitbook.io/php-function-to-calculate-the-best-font-color-for-a-background-color/
-    function textColor($hexCode){
-        $redHex = substr($hexCode,0,2);
-        $greenHex = substr($hexCode,2,2);
-        $blueHex = substr($hexCode,4,2);
-    
-        $r = (hexdec($redHex)) / 255;
-        $g = (hexdec($greenHex)) / 255;
-        $b = (hexdec($blueHex)) / 255;
-    
-        $brightness = (($r * 299) + ($g * 587) + ($b * 114)) / 1000;
-        // human eye sees 60% easier
-        if($brightness > .6){
-            return '000000';
-        }else{
-            return 'ffffff';
-        }
+    function textColor($hexCode) {
+        $r = hexdec(substr($hexCode, 0, 2)) / 255;
+        $g = hexdec(substr($hexCode, 2, 2)) / 255;
+        $b = hexdec(substr($hexCode, 4, 2)) / 255;
+        return (($r * 299) + ($g * 587) + ($b * 114)) / 1000 > .6 ? '000000' : 'ffffff';
     }
 }
 
-if (!function_exists('formGenerator'))
-{
-    /**
-     * Form generator based on schema
-     *
-     * @param [type] $data
-     * @param array $record
-     * @param string $actionUrl
-     * @param [type] $opac
-     * @return void
-     */
+/* ================= Form Generator v3 ================= */
+
+if (!function_exists('formGenerator')) {
     function formGenerator($data, $record = [], $actionUrl = '', $opac = null)
     {
-        $structure = json_decode($data->structure, true);
-        $option = json_decode($data->option??'');
-        $info = json_decode($data->info);
+        $structure = json_decode($data->structure, true) ?: [];
+        $option    = msr_option($data);
+        $info      = json_decode($data->info ?? '') ?: (object)['title' => 'Pendaftaran Anggota', 'desc' => '', 'position' => 'top'];
+
+        $isAdmin  = $actionUrl !== '' && strpos($actionUrl, 'admin') !== false;
+        $isPublic = $actionUrl !== '' && !$isAdmin;
+        $wizard   = $isPublic && (bool)($option->wizard ?? true);
+        $maxKb    = (int)($option->max_image_kb ?? 2048);
 
         ob_start();
 
-        // Start form
-        $js = '';
-        $withUpload = '';
-        if (($option?->image??false)) $withUpload = 'enctype="multipart/form-data"';
+        if ($key = flash()->includes('self_regis_success')) echo '<div class="alert alert-success my-2">' . msr_e($key) . '</div>';
+        if ($key = flash()->includes('self_regis_error'))   echo '<div class="alert alert-danger my-2">' . msr_e($key) . '</div>';
 
-        echo '<form id="self_member" method="POST" action="' . $actionUrl . '" ' . $withUpload . '>';
+        $withUpload = ($option->image ?? false) ? ' enctype="multipart/form-data"' : '';
+        echo '<form id="self_member" method="POST" action="' . msr_e($actionUrl) . '"' . $withUpload . '>';
 
-        // set error
-        if ($key = flash()->includes('self_regis_error'))
-        {
-            flash()->danger($key);
-        }
-
-        // set action url
-        if ($actionUrl === '' || stripos($actionUrl, 'admin') !== false) {
-            if ($actionUrl === '') {
-                echo '<h3>Pratinjau</h3>';
-                echo '<h5>Skema ' . $data->name . '</h5>';
-            } else {
-                echo '<h3>Pratinjau Data</h3>';
-                echo '<h5>Calon anggota ' . $record['member_name'] . '</h5>';
+        if ($actionUrl === '') {
+            echo '<h3>Pratinjau</h3><h5>Skema ' . msr_e($data->name) . '</h5>';
+        } elseif ($isAdmin) {
+            echo '<h3>Pratinjau Data</h3><h5>Calon anggota ' . msr_e($record['member_name'] ?? '') . '</h5>';
+            if (array_key_exists('email_verified_at', $record)) {
+                echo empty($record['email_verified_at'])
+                    ? '<span class="badge badge-warning">Email belum diverifikasi</span>'
+                    : '<span class="badge badge-success">Email terverifikasi ✓</span>';
             }
         } else {
             if ($opac !== null) $opac->page_title = $info->title;
-            $descInfo = '<div class="alert alert-info p-3">' . strip_tags($info->desc, '<p><a><i><em><h1><h2><h3><ul><ol><li>') . '</div>';
+            $descInfo = '<div class="alert alert-info p-3">' . strip_tags($info->desc ?? '', '<p><a><i><em><strong><h1><h2><h3><ul><ol><li><br>') . '</div>';
         }
+        if (($info->position ?? 'top') === 'top' && isset($descInfo)) echo $descInfo;
 
-        if ($info->position == 'top' && isset($descInfo)) {
-            echo $descInfo;
-        }
+        $fields = [];
+        $jsChecks = '';
 
-        // Generate form structure
         foreach ($structure as $key => $column) {
-            // Convert key to fieldname
-            if (strpos($actionUrl, 'admin') == true) { 
-                if (empty($column['advfield'])) {
-                    $key = $column['field'];
-                } else {
-                    $advfield = explode(',', $column['advfield']);
-                    $key = $advfield[0];
-                }
+            $fieldKey = $key;
+            if ($isAdmin) $fieldKey = empty($column['advfield']) ? $column['field'] : explode(',', $column['advfield'])[0];
+
+            $required = (bool)($column['is_required'] ?? false);
+            $reqAttr  = ($required && !($isAdmin && $column['field'] === 'mpasswd')) ? ' required' : '';
+            $mark     = $reqAttr ? ' <em class="text-danger">*</em>' : '';
+            $label    = msr_e($column['name']);
+
+            $default = $record[$column['field']] ?? '';
+            if ($column['field'] === 'advance') {
+                $advName = trim(explode(',', $column['advfield'] ?? '')[0]);
+                $default = $record[$advName] ?? '';
             }
+            $default = (string)$default;
+            $defaultE = msr_e($default);
 
-            // determine mandatory of the element
-            $is_required = $column['is_required'] === true ? ' required' : '';
+            $html = '<div class="my-3 msr-field"><label class="form-label"><strong>' . $label . $mark . '</strong></label>';
 
-            // Set label element
-            $required_mark = $is_required ? '<em class="text-danger">*</em>' : '';
-            echo <<<HTML
-            <div class="my-3">
-                <label class="form-label"><strong>{$column['name']} {$required_mark}</strong></label>
-            HTML;
-
-            // Get default value
-            $defaultValue = $record[$column['field']]??$record[$column['advfield']]??'';
-
-            // special condition of some field type
-            if (in_array($column['advfieldtype'], ['enum','enum_radio','text_multiple'])) {
-                list($name, $detail) = explode(',', $column['advfield']);
-                $defaultValue = $record[$name]??'';
-            }
-    
-            // set html form element based on database field
             switch ($column['field']) {
                 case 'mpasswd':
-                    if ($actionUrl !== '') {
-                        $is_required = '';
+                    $html .= '<input type="password" name="form[' . $fieldKey . ']" id="pass1" class="form-control" placeholder="Masukkan ' . $label . '" minlength="8" autocomplete="new-password"' . $reqAttr . '>';
+                    if ($isPublic) {
+                        $html .= '<div class="progress mt-1" style="height:6px"><div id="msrStrength" class="progress-bar bg-danger" style="width:10%"></div></div>';
                     }
-                    echo <<<HTML
-                    <br>
-                    <small>tulis dibawah berikut</small>
-                    <input type="password" placeholder="masukan {$column['name']} anda" name="form[{$key}]" id="pass1" class="form-control" {$is_required}>
-                    <small>konfirmasi ulang password anda</small>
-                    <input type="password" name="confirm_password" placeholder="masukan ulang {$column['name']} anda" id="pass2" class="form-control" {$is_required}>
-                    HTML;
+                    $html .= '<small>Konfirmasi ulang kata sandi</small>
+                              <input type="password" name="confirm_password" id="pass2" class="form-control" placeholder="Ulangi kata sandi" autocomplete="new-password"' . $reqAttr . '>
+                              <small id="msrMatch"></small>';
                     break;
 
                 case 'gender':
-                    $man = $defaultValue != 1 ?:'selected';
-                    $woman = $defaultValue != 0 ?:'selected';
-                    echo <<<HTML
-                    <select name="form[{$key}]" class="form-control" {$is_required}>
-                        <option>Pilih</option>
-                        <option value="1" {$man}>Laki-Laki</option>
-                        <option value="0" {$woman}>Perempuan</option>
-                    </select>
-                    HTML;
+                    $sel1 = $default === '1' ? ' selected' : '';
+                    $sel0 = ($default === '0' && $default !== '') ? ' selected' : '';
+                    $html .= '<select name="form[' . $fieldKey . ']" class="form-control"' . $reqAttr . '>
+                                <option value="">Pilih</option>
+                                <option value="1"' . $sel1 . '>Laki-Laki</option>
+                                <option value="0"' . $sel0 . '>Perempuan</option>
+                              </select>';
                     break;
 
                 case 'member_address':
-                    echo <<<HTML
-                    <textarea name="form[{$key}]" placeholder="masukan {$column['name']} anda" class="form-control" {$is_required}>{$defaultValue}</textarea>
-                    HTML;
+                    $html .= '<textarea name="form[' . $fieldKey . ']" class="form-control" placeholder="Masukkan ' . $label . '"' . $reqAttr . '>' . $defaultE . '</textarea>';
                     break;
 
                 case 'member_type_id':
-                    $memberType = \SLiMS\DB::getInstance()->query('select member_type_id, member_type_name from mst_member_type');
-                    echo '<select class="form-control" name="form[' . $key . ']" ' . $is_required . '>';
-                    echo '<option value="0">Pilih</option>';
-                    while ($result = $memberType->fetch(PDO::FETCH_NUM)) {
-                        echo '<option value="' . $result[0] . '" ' . ($defaultValue != $result[0] ?:'selected') . '>' . $result[1] . '</option>';
+                    $mt = DB::getInstance()->query('select member_type_id, member_type_name from mst_member_type');
+                    $html .= '<select name="form[' . $fieldKey . ']" class="form-control"' . $reqAttr . '><option value="">Pilih</option>';
+                    while ($r = $mt->fetch(PDO::FETCH_NUM)) {
+                        $sel = ((string)$default === (string)$r[0] && $default !== '') ? ' selected' : '';
+                        $html .= '<option value="' . msr_e($r[0]) . '"' . $sel . '>' . msr_e($r[1]) . '</option>';
                     }
-                    echo '</select>';
-                    break;
-                
-                // Advance field element
-                case 'advance':
-                    switch ($column['advfieldtype']) {
-
-                        // short text field
-                        case 'varchar':
-                        case 'int':
-                            $types = ['varchar' => 'text', 'int' => 'number'];
-                            $type = $types[$column['advfieldtype']];
-                            echo <<<HTML
-                            <input type="{$type}" name="form[{$key}]" value="{$defaultValue}" placeholder="masukan {$column['name']} anda" class="form-control" {$is_required}/>
-                            HTML;
-                            break;
-
-                        // long text
-                        case 'text':
-                            echo <<<HTML
-                            <textarea name="form[{$key}]" placeholder="masukan {$column['name']} anda" class="form-control" {$is_required}>{$defaultValue}</textarea>
-                            HTML;
-                            break;
-                        
-                        // select list
-                        case 'enum':
-                            list($field,$list) = explode(',', $column['advfield']);
-                            echo '<select name="form[' . $key . ']" class="form-control" '.$defaultValue.'>';
-                            echo '<option value="">Pilih</option>';
-                            $selected = '';
-                            foreach (explode('|', $list) as $item) {
-                                if ($defaultValue == $item) $selected = 'selected';
-                                echo '<option value="'.$item.'" '.$selected.'>' . $item . '</option>';
-                                $selected = '';
-                            }
-                            echo '</select>';
-                            break;
-
-                        // Select list as radio button
-                        case 'enum_radio':
-                            $field = explode(',', $column['advfield']);
-                            $uniqueId = md5($field[0]);
-                            $checked = '';
-
-                            if ($is_required) {
-                                $js .= <<<HTML
-                                if ($('.radio{$uniqueId}:checked').length < 1) {
-                                    evt.preventDefault();
-                                    alert('Pilih salah satu dari isian {$column['name']}');
-                                    return;
-                                }
-                                HTML;
-                            }
-
-                            echo '<div class="d-flex flex-column">';
-                            foreach (explode('|', trim($field[1])) as $optionKey => $value) {
-                                if (empty($value)) continue;
-                                if ($defaultValue == $value) $checked = 'checked';
-                                echo '<div>
-                                    <input class="radio'.$uniqueId.'" id="radio' . $uniqueId . '-' . $optionKey . '" data-title="' . $column['name'] . '" type="radio" name="form[' . $key . ']" value="' . $value . '" ' . $checked . '/>
-                                    <label for="radio' . $uniqueId . '-' . $optionKey . '" style="cursor: pointer">' . $value . '</label>
-                                </div>';
-                            }
-                            echo '</div>';
-                            break;
-
-                        // multiple choise data
-                        case 'text_multiple':
-                            $field = explode(',', $column['advfield']);
-                            $uniqueId = md5($field[0]);
-                            $defaultValue = json_decode(trim($defaultValue), true);
-                            $checked = '';
-
-                            if ($is_required) {
-                                $js .= <<<HTML
-                                if ($('.checkbox{$uniqueId}:checked').length < 1) {
-                                    evt.preventDefault();
-                                    alert('Pilih salah satu dari isian {$column['name']}');
-                                    return;
-                                }
-                                HTML;
-                            }
-
-                            echo '<div class="d-flex flex-column">';
-                            foreach (explode('|', trim($field[1])) as $optionKey => $value) {
-                                if (empty($value)) continue;
-                                if (in_array($value, $defaultValue??[])) $checked = 'checked';
-                                echo '<div class="mx-3">
-                                    <input class="checkbox'.$uniqueId.'" id="checkbox' . $uniqueId . '-' . $optionKey . '" type="checkbox" name="form[' . $key . '][]" value="' . $value . '" ' . $checked . '/>
-                                    <label for="checkbox' . $uniqueId . '-' . $optionKey . '" style="cursor: pointer">' . $value . '</label>
-                                </div>';
-                                $checked = '';
-                            }
-                            echo '</div>';
-                            break;
-                    }
+                    $html .= '</select>';
                     break;
 
-                //  image cover
                 case 'member_image':
-                    if (($option?->image??null) === null) {
-                        echo '<div class="alert alert-info font-weight-bold">Anda belum mengantur ruas ini pada "Pengaturan Form"</div>';
+                    if (!($option->image ?? false)) {
+                        $html .= '<div class="alert alert-info">Foto belum diaktifkan pada "Pengaturan Form".</div>';
+                    } elseif ($isAdmin && !empty($record['member_image'])) {
+                        $img = Storage::images()->isExists('persons/' . $record['member_image']) ? $record['member_image'] : 'avatar.jpg';
+                        $html .= '<img class="d-block rounded" src="' . SWB . 'lib/minigalnano/createthumb.php?filename=images/persons/' . urlencode($img) . '&width=120"/>';
                     } else {
-                        if (!isset($record['member_image'])) {
-                            echo <<<HTML
-                            <input type="file" name="member_image" placeholder="masukan {$column['name']} anda" class="form-control d-block" {$is_required}/>
-                            <small>Maksimal ukuran file foto adalah 2MB</small>
-                            HTML;
-                        } else {
-                            $image = Storage::images()->isExists('persons/' . $record['member_image']) ? $record['member_image'] : 'avatar.jpg';
-                            echo '<img class="d-block"src="' . SWB . 'lib/minigalnano/createthumb.php?filename=images/persons/' . $image . '&width=120"/>';
+                        $html .= '<input type="file" name="member_image" accept=".jpg,.jpeg,.png" class="form-control d-block" data-max-kb="' . $maxKb . '"' . $reqAttr . '>
+                                  <small>Maksimal ' . $maxKb . ' KB (JPG/PNG)</small>
+                                  <img id="msrPhotoPreview" class="d-none rounded mt-2" style="max-height:140px"/>';
+                    }
+                    break;
+
+                case 'advance':
+                    $advType = $column['advfieldtype'] ?? 'varchar';
+                    $parts   = explode(',', $column['advfield'] ?? '');
+                    $choices = array_values(array_filter(array_map('trim', explode('|', $parts[1] ?? ''))));
+                    $uid     = md5($parts[0] ?? $label);
+                    if (in_array($advType, ['enum', 'enum_radio', 'text_multiple'])) $default = (string)($record[trim($parts[0] ?? '')] ?? '');
+
+                    if ($advType === 'text') {
+                        $html .= '<textarea name="form[' . $fieldKey . ']" class="form-control"' . $reqAttr . '>' . msr_e($default) . '</textarea>';
+                    } elseif ($advType === 'enum') {
+                        $html .= '<select name="form[' . $fieldKey . ']" class="form-control"' . $reqAttr . '><option value="">Pilih</option>';
+                        foreach ($choices as $c) $html .= '<option value="' . msr_e($c) . '"' . ($default === $c ? ' selected' : '') . '>' . msr_e($c) . '</option>';
+                        $html .= '</select>';
+                    } elseif ($advType === 'enum_radio') {
+                        if ($reqAttr && $isPublic) $jsChecks .= "if ($('.radio{$uid}:checked').length < 1) { evt.preventDefault(); alert('Pilih salah satu: {$label}'); return; }\n";
+                        foreach ($choices as $i => $c) {
+                            $html .= '<div><input class="radio' . $uid . '" id="r' . $uid . $i . '" type="radio" name="form[' . $fieldKey . ']" value="' . msr_e($c) . '"' . ($default === $c ? ' checked' : '') . '> <label for="r' . $uid . $i . '" style="cursor:pointer">' . msr_e($c) . '</label></div>';
                         }
-                    }
-                    break;
-
-                // lets generate as inptu type text or date or email
-                default:
-                    $types = ['birth_date' => 'date', 'member_email' => 'email'];
-                    $type = isset($types[$column['field']]) ? $types[$column['field']] : 'text';
-                    echo <<<HTML
-                    <input type="{$type}" name="form[{$key}]" value="{$defaultValue}" placeholder="masukan {$column['name']} anda" class="form-control" {$is_required}/>
-                    HTML;
-                    break;
-            }
-
-            echo <<<HTML
-            </div>
-            HTML;
-        }
-
-        if ($info->position == 'bottom' && isset($descInfo)) {
-            echo $descInfo;
-        }
-
-        if (($option?->with_agreement??false) && strpos($actionUrl, 'admin') === false) {
-            echo <<<HTML
-            <div>
-                <input type="checkbox" id="iAgree"/>
-                <label for="iAgree" style="cursor: pointer">Saya menyetujui prasyarat diatas</label>
-            </div>
-            HTML;    
-        }
-
-        // set form action url
-        if ($actionUrl !== '') {
-            // Captcha initialize
-            $captcha = Captcha::section('memberarea');
-
-            // public area
-            if (strpos($actionUrl, 'admin') === false) {
-                if (($option?->captcha??false) && $captcha->isSectionActive() && config('captcha', false)) 
-                {
-                    echo '<div class="captchaMember my-2">';
-                    echo $captcha->getCaptcha();
-                    echo '</div>';
-                }
-    
-                echo \Volnix\CSRF\CSRF::getHiddenInputString();
-
-                $disableBeforeAgree = '';
-                if ($option?->with_agreement??false) $disableBeforeAgree = 'disabled';
-
-                echo '<div class="form-group">
-                    <input type="hidden" name="action" value="save"/>
-                    <button class="btn btn-primary" type="submit" name="save" '.$disableBeforeAgree.' ' . (empty($disableBeforeAgree) ? '' : 'title="Klik \'Saya menyetujui prasyarat diatas\'"') . '>Daftar</button>
-                    <button class="btn btn-outline-secondary" type="reset" name="save">Batal</button>
-                </div>
-                ';
-            } else {
-                echo '<div class="form-group">
-                    <input type="hidden" name="action" value="acc"/>
-                    <button class="btn btn-success" type="submit" name="acc">Setujui</button>
-                    <a class="btn btn-danger" href="' .  pluginUrl(['section' => 'view_detail', 'member_id' => $_GET['member_id']??0, 'headless' => 'yes', 'action' => 'delete_reg']) . '">Hapus</a>
-                </div>';
-            }
-            if (strpos($actionUrl, 'admin') === false) {
-                echo '<strong><em class="text-danger">*</em> ) wajib diisi</strong>';
-            }
-        }
-        echo '</form>';
-
-        // Custom JS
-        if (strpos($actionUrl, 'admin') === false) {
-            $agreeJs = '';
-            if ($option?->with_agreement??false) {
-                $agreeJs = <<<HTML
-                $('#iAgree').click(function() {
-                    if ($('#iAgree:checked').length < 1) { 
-                        $('button[name="save"]').prop('disabled', true)
-                        $('button[name="save"]').prop('title', 'Klik \'Saya menyetujui prasyarat diatas\'')
+                    } elseif ($advType === 'text_multiple') {
+                        $sel = json_decode($default, true) ?: [];
+                        if ($reqAttr && $isPublic) $jsChecks .= "if ($('.checkbox{$uid}:checked').length < 1) { evt.preventDefault(); alert('Pilih salah satu: {$label}'); return; }\n";
+                        foreach ($choices as $i => $c) {
+                            $html .= '<div><input class="checkbox' . $uid . '" id="c' . $uid . $i . '" type="checkbox" name="form[' . $fieldKey . '][]" value="' . msr_e($c) . '"' . (in_array($c, $sel) ? ' checked' : '') . '> <label for="c' . $uid . $i . '" style="cursor:pointer">' . msr_e($c) . '</label></div>';
+                        }
                     } else {
-                        $('button[name="save"]').prop('title', 'Klik untuk menyimpan data')
-                        $('button[name="save"]').prop('disabled', false)
+                        $type = $advType === 'int' ? 'number' : 'text';
+                        $html .= '<input type="' . $type . '" name="form[' . $fieldKey . ']" value="' . msr_e($default) . '" class="form-control" placeholder="Masukkan ' . $label . '"' . $reqAttr . '>';
                     }
-                });
-                HTML;
+                    break;
+
+                default:
+                    if ($column['field'] === 'member_id' && $isPublic && ($option->auto_id ?? false)) {
+                        $html .= '<div class="alert alert-secondary py-2 mb-0"><strong>ID otomatis:</strong> dibuat sistem dengan pola <code>' . msr_e(msr_id_example($option)) . '</code> — Anda tidak perlu mengisi ID.</div>';
+                        break;
+                    }
+                    $types = ['birth_date' => 'date', 'member_email' => 'email'];
+                    $type  = $types[$column['field']] ?? 'text';
+                    $extra = $column['field'] === 'member_id' ? ' maxlength="20" pattern="[A-Za-z0-9._\-]{3,20}" title="3-20 karakter: huruf/angka/._-"' : '';
+                    $html .= '<input type="' . $type . '" name="form[' . $fieldKey . ']" value="' . $defaultE . '" class="form-control" placeholder="Masukkan ' . $label . '"' . $extra . $reqAttr . '>';
             }
+
+            $fields[$key] = $html . '</div>';
+        }
+
+        /* ---- ekor form (info bawah, persetujuan, captcha, tombol) ---- */
+        $tail = '';
+        if (($info->position ?? '') === 'bottom' && isset($descInfo)) $tail .= $descInfo;
+
+        if ($isPublic) {
+            if (($option->with_agreement ?? false)) {
+                $tail .= '<div class="my-2"><input type="checkbox" id="iAgree"/> <label for="iAgree" style="cursor:pointer">Saya menyetujui prasyarat di atas</label></div>';
+            }
+            if (($option->captcha ?? false) && class_exists(Captcha::class) && config('captcha', false)) {
+                $captcha = Captcha::section('memberarea');
+                if ($captcha->isSectionActive()) $tail .= '<div class="captchaMember my-2">' . $captcha->getCaptcha() . '</div>';
+            }
+            $tail .= msr_csrf_field();
+            $tail .= '<input type="text" name="msr_hp" value="" class="d-none" tabindex="-1" autocomplete="off">';
+            $tail .= '<input type="hidden" name="msr_ts" value="' . time() . '">';
+            $dis = ($option->with_agreement ?? false) ? ' disabled title="Centang persetujuan terlebih dahulu"' : '';
+            $tail .= '<div class="form-group my-3">
+                        <input type="hidden" name="action" value="save"/>
+                        <button class="btn btn-primary" type="submit" name="save"' . $dis . '>Daftar</button>
+                        <button class="btn btn-outline-secondary" type="reset">Batal</button>
+                      </div><strong><em class="text-danger">*</em> ) wajib diisi</strong>';
+        } elseif ($isAdmin) {
+            $tail .= '<div class="form-group my-3">
+                        <input type="hidden" name="action" value="acc"/>
+                        <button class="btn btn-success" type="submit" name="acc">Setujui</button>
+                        <a class="btn btn-danger" href="' . pluginUrl(['section' => 'view_detail', 'member_id' => $_GET['member_id'] ?? 0, 'headless' => 'yes', 'action' => 'delete_reg']) . '">Hapus</a>
+                      </div>';
+        }
+
+        /* ---- wizard / langkah ---- */
+        $chunks = ($wizard && count($fields) > 4) ? array_chunk($fields, 4, true) : [$fields];
+        $total  = count($chunks);
+        echo '<div id="msrWizard" data-total="' . $total . '">';
+        if ($total > 1) echo '<div class="progress my-3" style="height:8px"><div id="msrProgress" class="progress-bar bg-success" style="width:' . round(100 / $total) . '%"></div></div>';
+        foreach ($chunks as $i => $chunk) {
+            echo '<div class="msr-step' . ($i > 0 ? ' d-none' : '') . '" data-step="' . $i . '">';
+            if ($total > 1) echo '<h5 class="text-muted">Langkah ' . ($i + 1) . ' dari ' . $total . '</h5>';
+            echo implode('', $chunk);
+            if ($total > 1) {
+                echo '<div class="d-flex justify-content-between my-3">';
+                echo $i > 0 ? '<button type="button" class="btn btn-outline-secondary msr-prev">&larr; Kembali</button>' : '<span></span>';
+                if ($i < $total - 1) echo '<button type="button" class="btn btn-primary msr-next">Lanjut &rarr;</button>';
+                echo '</div>';
+            }
+            if ($i === $total - 1) echo $tail;
+            echo '</div>';
+        }
+        echo '</div></form>';
+
+        /* ---- JS ---- */
+        if ($isPublic) {
+            $agreeJs = ($option->with_agreement ?? false) ? "
+                $('#iAgree').click(function(){
+                    let ok = $('#iAgree:checked').length > 0;
+                    \$('button[name=\"save\"]').prop('disabled', !ok);
+                });" : '';
             echo <<<HTML
-            <script>
-                $(document).ready(function() {
-                    {$agreeJs}
-                    $('#self_member').submit(function(evt) {
-                        {$js}
-                    })
-                })
-            </script>
-            HTML;
+<script>
+$(document).ready(function() {
+    function msrProgress() {
+        let total = parseInt($('#msrWizard').attr('data-total'));
+        let idx = parseInt($('.msr-step:not(.d-none)').attr('data-step') || 0);
+        $('#msrProgress').css('width', Math.round((idx + 1) / total * 100) + '%');
+    }
+    $('#msrWizard').on('click', '.msr-next', function() {
+        let step = $(this).closest('.msr-step'), ok = true;
+        step.find('input,select,textarea').each(function() {
+            if (!this.checkValidity()) { this.reportValidity(); ok = false; return false; }
+        });
+        if (!ok) return;
+        step.addClass('d-none').next('.msr-step').removeClass('d-none');
+        msrProgress();
+    });
+    $('#msrWizard').on('click', '.msr-prev', function() {
+        let step = $(this).closest('.msr-step');
+        step.addClass('d-none').prev('.msr-step').removeClass('d-none');
+        msrProgress();
+    });
+    $('#pass1').on('input', function() {
+        let v = $(this).val(), s = 0;
+        if (v.length >= 8) s++; if (/[A-Z]/.test(v)) s++; if (/[0-9]/.test(v)) s++; if (/[^A-Za-z0-9]/.test(v)) s++;
+        let w = [10, 35, 60, 85, 100][s], c = ['bg-danger','bg-danger','bg-warning','bg-info','bg-success'][s];
+        $('#msrStrength').removeClass('bg-danger bg-warning bg-info bg-success').addClass(c).css('width', w + '%');
+    });
+    $('#pass2').on('input', function() {
+        let ok = $(this).val() !== '' && $(this).val() === $('#pass1').val();
+        $('#msrMatch').html(ok ? '&#10003; Kata sandi cocok' : '&#10007; Belum cocok').css('color', ok ? 'green' : 'red');
+    });
+    $('input[name="member_image"]').on('change', function() {
+        let f = this.files[0]; if (!f) return;
+        let maxKb = parseInt($(this).data('max-kb') || '2048', 10);
+        if (f.size > maxKb * 1024) { alert('Ukuran foto melebihi ' + maxKb + ' KB'); this.value = ''; return; }
+        let r = new FileReader();
+        r.onload = function(e) { $('#msrPhotoPreview').attr('src', e.target.result).removeClass('d-none'); };
+        r.readAsDataURL(f);
+    });
+    {$agreeJs}
+    $('#self_member').submit(function(evt) {
+        {$jsChecks}
+        let bad = null;
+        $('#msrWizard .msr-step').each(function() {
+            let inv = $(this).find(':input').filter(function() { return !this.checkValidity(); });
+            if (inv.length) { bad = { step: $(this), el: inv.first() }; return false; }
+        });
+        if (bad) {
+            evt.preventDefault();
+            $('.msr-step').addClass('d-none'); bad.step.removeClass('d-none');
+            bad.el[0].reportValidity(); msrProgress(); return;
+        }
+        $('button[name="save"]').prop('disabled', true).text('Mengirim…');
+    });
+});
+</script>
+HTML;
         }
         return ob_get_clean();
     }

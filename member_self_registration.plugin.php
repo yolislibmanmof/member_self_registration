@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: member_self_registration
- * Plugin URI: https://github.com/drajathasan/member_self_registration
- * Description: Plugin untuk daftar online
- * Version: 1.0.0
- * Author: Drajat Hasan
- * Author URI: Drajat Hasan
+ * Plugin URI: https://github.com/yolislibmanmof/member_self_registration
+ * Description: Pendaftaran anggota mandiri via OPAC: wizard multi-langkah, verifikasi email, anti-spam, ACC + notifikasi email, audit log. Kompatibel SLiMS 9.8.x & PHP 8.2.
+ * Version: 3.0.0
+ * Author: Drajat Hasan (v1-v2) & UNIMOF (v3)
+ * Author URI: https://github.com/yolislibmanmof
  */
 
 use SLiMS\DB;
@@ -13,33 +13,27 @@ use SLiMS\Plugins;
 use SLiMS\Url;
 use SLiMS\Table\Schema;
 
-define('MSLR', __DIR__);
+defined('MSLR') or define('MSLR', __DIR__);
+defined('MSWB') or define('MSWB', (string)Url::getSlimsBaseUri('plugins/' . basename(MSLR) . '/'));
 
-define('MSWB', (string)Url::getSlimsBaseUri('plugins/' . basename(MSLR) . '/'));
+require_once __DIR__ . DS . 'helper.php';
 
-// load helper
-include_once __DIR__ . DS . 'helper.php';
-
-// get plugin instance
 $plugin = Plugins::getInstance();
+// QR opsional: muat vendor plugin bila ada (composer require chillerlan/php-qrcode)
+if (file_exists(__DIR__ . '/vendor/autoload.php')) $plugin->registerAutoload();
 
-// registering menus
+// Submenu admin: Keanggotaan → Daftar Online
 $plugin->registerMenu('membership', 'Daftar Online', __DIR__ . '/pages/membership/index.php');
 
-// Get active schema from database
-if (Schema::hasTable($table = 'self_registration_schemas')) {
-    $activeSchema = DB::getInstance()->query('select id,name from ' . $table . ' where status =  1');
-
+// Menu OPAC mengikuti nama skema aktif
+if (Schema::hasTable('self_registration_schemas')) {
+    $activeSchema = DB::getInstance()->query('select id,name from self_registration_schemas where status = 1');
     if ($activeSchema->rowCount()) {
         $data = $activeSchema->fetchObject();
         $plugin->registerMenu('opac', $data->name, __DIR__ . DS . 'pages' . DS . 'opac' . DS . 'index.php');
     }
 }
 
-// Overriding membership page
-$plugin->register(Plugins::MEMBERSHIP_INIT, function()  use($table) {
-    global $member_custom_fields, $can_read, $can_write, $sysconf, $dbs;
-
-    include __DIR__ . '/pages/customs/membership/index.php';
-    exit;
-});
+// v3: TIDAK lagi override modul membership (folder pages/customs DIHAPUS).
+// Ruas mahir disuntik lewat hook resmi SLiMS 9.7+/9.8.
+require_once __DIR__ . DS . 'pages' . DS . 'membership' . DS . 'msr_hooks.php';

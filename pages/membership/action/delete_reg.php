@@ -1,17 +1,12 @@
 <?php
-use SLiMS\DB;
-use SLiMS\Plugins;
-
 defined('INDEX_AUTH') or die('Direct access is not allowed!');
 
+if (!utility::havePrivilege('membership', 'w')) { toastr('Hak tulis diperlukan.')->error(); exit; }
+
 $schema = $activeSchema->fetchObject();
-$baseTable = 'self_registration_' . trim(strtolower(str_replace(' ', '_', $schema->name)));
-
-Plugins::getInstance()->execute('member_self_before_reject', ['baseTable' => $baseTable]);
-
-$delete = DB::getInstance()->prepare('delete from ' . $baseTable . ' where `member_id` = ?');
-$delete->execute([$_GET['member_id']]);
-
+if ($schema) {
+    msr_reject_pending((string)($_GET['member_id'] ?? ''), $schema, 'Dihapus oleh petugas melalui pratinjau.');
+}
 echo '<script>top.jQuery.colorbox.close();</script>';
 redirect()->simbioAJAX(pluginUrl(reset: true));
 exit;
